@@ -120,5 +120,91 @@ class UnsupportedTests(unittest.TestCase):
             cpu.step()
 
 
+class BxTests(unittest.TestCase):
+    def test_bx_to_thumb(self):
+        cpu = load([0xE3A00011, 0xE12FFF10])  # MOV r0,#0x11 ; BX r0
+        cpu.mem.write32(0x10, 0)              # placeholder, overwritten below
+        cpu.mem.data[0x10:0x12] = (0x2107).to_bytes(2, "little")  # Thumb MOV r1,#7
+        cpu.run(3)
+        self.assertTrue(cpu.thumb)
+        self.assertEqual(cpu.pc, 0x12)
+        self.assertEqual(cpu.regs[1], 7)
+
+    def test_bx_to_arm(self):
+        cpu = load([0xE3A00020, 0xE12FFF10, 0xE3A01009])  # MOV r0,#0x20 ; BX r0 ; MOV r1,#9
+        cpu.run(2)
+        self.assertFalse(cpu.thumb)
+        self.assertEqual(cpu.pc, 0x20)
+
+
+def load_thumb(halfwords, base=0, mem_size=0x1000):
+    mem = A.Memory(mem_size, base=0)
+    for i, hw in enumerate(halfwords):
+        mem.data[base + i * 2:base + i * 2 + 2] = hw.to_bytes(2, "little")
+    return A.Arm(mem, pc=base, thumb=True)
+
+
+class ThumbTests(unittest.TestCase):
+    def test_mov_cmp_add_sub_immediate(self):
+        cpu = load_thumb([0x2005, 0x3103, 0x2805, 0x3801])  # MOV r0,#5 ; ADD r1,#3 ; CMP r0,#5 ; SUB r0,#1
+        cpu.run(3)
+        self.assertEqual(cpu.regs[0], 5)
+        self.assertEqual(cpu.regs[1], 3)
+        self.assertTrue(cpu.z)
+        cpu.run(1)
+        self.assertEqual(cpu.regs[0], 4)
+
+    def test_add_register(self):
+        cpu = load_thumb([0x2005, 0x2103, 0x1842])  # r0=5 ; r1=3 ; ADD r2,r0,r1
+        cpu.run(3)
+        self.assertEqual(cpu.regs[2], 8)
+
+    def test_bx_lr_returns(self):
+        cpu = load_thumb([0x4770])  # BX lr
+        cpu.regs[14] = 0x21         # thumb address
+        cpu.run(1)
+        self.assertEqual(cpu.pc, 0x20)
+        self.assertTrue(cpu.thumb)
+
+    def test_countdown_loop(self):
+        # 0: SUB r0,#1 ; 2: CMP r0,#0 ; 4: BNE 0
+        cpu = load_thumb([0x3801, 0x2800, 0xD1FC])
+        cpu.regs[0] = 5
+        executed = cpu.run(1000, stop_pc=6)
+        self.assertEqual(cpu.regs[0], 0)
+        self.assertEqual(cpu.pc, 6)
+        self.assertEqual(executed, 15)
+
+    def test_unconditional_branch(self):
+        cpu = load_thumb([0xE001, 0x2001, 0x2002, 0x2003])  # B +4 skips one halfword
+        cpu.run(1)
+        self.assertEqual(cpu.pc, 6)
+
+    def test_bl_sets_link_and_jumps(self):
+        cpu = load_thumb([0xF000, 0xF806])  # BL to 0x10
+        cpu.run(1)
+        self.assertEqual(cpu.pc, 0x10)
+        self.assertEqual(cpu.regs[14], 5)   # return address 4, Thumb bit set
+
+    def test_ldr_pc_relative(self):
+        cpu = load_thumb([0x4801])          # LDR r0,[pc,#4] -> address 8
+        cpu.mem.write32(8, 0x12345678)
+        cpu.run(1)
+        self.assertEqual(cpu.regs[0], 0x12345678)
+
+    def test_word_store_then_load(self):
+        # MOV r0,#0x42 ; STR r0,[r3,#4] ; LDR r4,[r3,#4]  (r3 set by the test)
+        cpu = load_thumb([0x2042, 0x6058, 0x685C])  # STR/LDR use word offset 1 (4 bytes)
+        cpu.regs[3] = 0x100
+        cpu.run(3)
+        self.assertEqual(cpu.mem.read32(0x104), 0x42)
+        self.assertEqual(cpu.regs[4], 0x42)
+
+    def test_unsupported_thumb_raises(self):
+        cpu = load_thumb([0x0000 | (0b00000 << 11) | (1 << 6)])  # LSL-style shift, not implemented
+        with self.assertRaises(A.CpuError):
+            cpu.step()
+
+
 if __name__ == "__main__":
     unittest.main()
